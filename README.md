@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 <div id="top"></div>
 <!--
 *** Thanks for checking out the Best-README-Template. If you have a suggestion
@@ -402,3 +403,7 @@ We thanks the following projects for reference of creating USB:
 [issues-url]: https://github.com/microsoft/Semi-supervised-learning/issues
 [license-shield]: https://img.shields.io/github/license/microsoft/Semi-supervised-learning.svg?style=for-the-badge
 [license-url]: https://github.com/microsoft/Semi-supervised-learning/blob/main/LICENSE.txt
+=======
+# CAM-NCP
+Repository for class-aware margin&amp;negative class penality
+>>>>>>> 31313ee2f73a9072843139adb0ab8afe39f34131
