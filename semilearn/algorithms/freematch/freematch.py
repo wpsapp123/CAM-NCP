@@ -69,7 +69,7 @@ class FreeMatch(AlgorithmBase):
         self.register_hook(FreeMatchThresholingHook(num_classes=self.num_classes, momentum=self.args.ema_p), "MaskingHook")
         super().set_hooks()
 
-    def calculate_k_i(self, prob_w, mask, m, num_classes, batch_size):                  ########################改了
+    def calculate_k_i(self, prob_w, mask, m, num_classes, batch_size):                  
         k_list = []
         prob_s_multipy = torch.ones_like(prob_w)
         sorted_probs, sorted_idx = torch.sort(prob_w, dim=-1, descending=True)
