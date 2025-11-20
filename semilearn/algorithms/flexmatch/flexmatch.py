@@ -44,6 +44,12 @@ class FlexMatch(AlgorithmBase):
         super().__init__(args, net_builder, tb_log, logger) 
         # flexmatch specified arguments
         self.init(T=args.T, p_cutoff=args.p_cutoff, hard_label=args.hard_label, thresh_warmup=args.thresh_warmup)
+        self.p_model = torch.ones((self.num_classes)) / self.num_classes
+        self.margin = 6
+        self.lambda_m = 0.1
+        self.lambda_n = 1
+        self.K = 8
+        self.global_topk_conf = None
     
     def init(self, T, p_cutoff, hard_label=True, thresh_warmup=True):
         self.T = T
@@ -55,6 +61,34 @@ class FlexMatch(AlgorithmBase):
         self.register_hook(PseudoLabelingHook(), "PseudoLabelingHook")
         self.register_hook(FlexMatchThresholdingHook(ulb_dest_len=self.args.ulb_dest_len, num_classes=self.num_classes, thresh_warmup=self.args.thresh_warmup), "MaskingHook")
         super().set_hooks()
+
+    def calculate_k_i(self, prob_w, mask, m, num_classes, batch_size):                  
+        k_list = []
+        prob_s_multipy = torch.ones_like(prob_w)
+        sorted_probs, sorted_idx = torch.sort(prob_w, dim=-1, descending=True)
+        topk_cumsum = torch.cumsum(sorted_probs, dim=-1)        
+        
+        if  self.global_topk_conf == None:
+            self.global_topk_conf = torch.zeros(num_classes)
+            for t in range(num_classes):
+                self.global_topk_conf[t] = (t+1) / num_classes
+
+        self.global_topk_conf = self.global_topk_conf * m + (1-m) * torch.mean(topk_cumsum, dim=0).cpu()
+        for b in range(batch_size):
+            for t in range(num_classes):
+                if (topk_cumsum[b][t] >= self.global_topk_conf[t]) or (t+1 >= self.K):                    
+                    prob_s_multipy[b, sorted_idx[b, range(t + 1)]] = 0                    
+                    break       
+        return prob_s_multipy
+        
+    def calibration_loss(self, inputs, mask, p_model):                
+        max_values = inputs.max(dim=1)
+        max_values = max_values.values.unsqueeze(dim=1).repeat(1, inputs.shape[1])
+        diff = max_values - inputs
+        mod =torch.max(p_model, dim=-1)[0]/p_model
+        loss_margin = (F.relu(diff - self.margin*mod)*(mask.unsqueeze(-1))).mean()            
+        
+        return loss_margin
 
     def train_step(self, x_lb, y_lb, idx_ulb, x_ulb_w, x_ulb_s):
         num_lb = y_lb.shape[0]
@@ -105,8 +139,15 @@ class FlexMatch(AlgorithmBase):
                                                pseudo_label,
                                                'ce',
                                                mask=mask)
+            if not self.p_model.is_cuda:                                      
+                self.p_model = self.p_model.to(prob_w.device)
+            self.p_model = self.p_model * 0.999 + (1 - 0.999) * prob_w.mean(dim=0)
+            # NCP_loss
+            ncp_loss = torch.mean((1-mask)*torch.mean(prob_s*self.calculate_k_i(prob_w, mask = mask, m=0.999, num_classes=prob_w.shape[1], batch_size=prob_w.shape[0]), dim=-1))
+            # CAM_loss
+            calibration_loss = self.calibration_loss(logits_x_ulb_s, mask, self.p_model)
 
-            total_loss = sup_loss + self.lambda_u * unsup_loss
+            total_loss = sup_loss + self.lambda_u * unsup_loss + self.lambda_m * calibration_loss + self.lambda_n * ncp_loss
 
         out_dict = self.process_out_dict(loss=total_loss, feat=feat_dict)
         log_dict = self.process_log_dict(sup_loss=sup_loss.item(), 
