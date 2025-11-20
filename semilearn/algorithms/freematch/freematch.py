@@ -50,6 +50,11 @@ class FreeMatch(AlgorithmBase):
         super().__init__(args, net_builder, tb_log, logger) 
         self.init(T=args.T, hard_label=args.hard_label, ema_p=args.ema_p, use_quantile=args.use_quantile, clip_thresh=args.clip_thresh)
         self.lambda_e = args.ent_loss_ratio
+        self.margin = 6
+        self.lambda_m = 0.1
+        self.lambda_n = 1
+        self.K = 8
+        self.global_topk_conf = None
 
     def init(self, T, hard_label=True, ema_p=0.999, use_quantile=True, clip_thresh=False):
         self.T = T
@@ -64,6 +69,33 @@ class FreeMatch(AlgorithmBase):
         self.register_hook(FreeMatchThresholingHook(num_classes=self.num_classes, momentum=self.args.ema_p), "MaskingHook")
         super().set_hooks()
 
+    def calculate_k_i(self, prob_w, mask, m, num_classes, batch_size):                  ########################改了
+        k_list = []
+        prob_s_multipy = torch.ones_like(prob_w)
+        sorted_probs, sorted_idx = torch.sort(prob_w, dim=-1, descending=True)
+        topk_cumsum = torch.cumsum(sorted_probs, dim=-1)        
+        
+        if  self.global_topk_conf == None:
+            self.global_topk_conf = torch.zeros(num_classes)
+            for t in range(num_classes):
+                self.global_topk_conf[t] = (t+1) / num_classes
+
+        self.global_topk_conf = self.global_topk_conf * m + (1-m) * torch.mean(topk_cumsum, dim=0).cpu()
+        for b in range(batch_size):
+            for t in range(num_classes):
+                if (topk_cumsum[b][t] >= self.global_topk_conf[t]) or (t+1 >= self.K):                    
+                    prob_s_multipy[b, sorted_idx[b, range(t + 1)]] = 0                    
+                    break       
+        return prob_s_multipy
+        
+    def calibration_loss(self, inputs, mask, p_model):                
+        max_values = inputs.max(dim=1)
+        max_values = max_values.values.unsqueeze(dim=1).repeat(1, inputs.shape[1])
+        diff = max_values - inputs
+        mod =torch.max(p_model, dim=-1)[0]/p_model
+        loss_margin = (F.relu(diff - self.margin*mod)*(mask.unsqueeze(-1))).mean()            
+        
+        return loss_margin
 
     def train_step(self, x_lb, y_lb, x_ulb_w, x_ulb_s):
         num_lb = y_lb.shape[0]
@@ -108,6 +140,8 @@ class FreeMatch(AlgorithmBase):
                                           pseudo_label,
                                           'ce',
                                           mask=mask)
+            # NCP_loss
+            ncp_loss = torch.mean((1-mask)*torch.mean(prob_s*self.calculate_k_i(prob_w, mask = mask, m=0.999, num_classes=prob_w.shape[1], batch_size=prob_w.shape[0]), dim=-1))
             
             # calculate entropy loss
             if mask.sum() > 0:
@@ -115,7 +149,10 @@ class FreeMatch(AlgorithmBase):
             else:
                ent_loss = 0.0
             # ent_loss = 0.0
-            total_loss = sup_loss + self.lambda_u * unsup_loss + self.lambda_e * ent_loss
+            
+            # CAM_loss
+            calibration_loss = self.calibration_loss(logits_x_ulb_s, mask, self.p_model)
+            total_loss = sup_loss + self.lambda_u * unsup_loss + self.lambda_m * calibration_loss + self.lambda_n * ncp_loss
 
         out_dict = self.process_out_dict(loss=total_loss, feat=feat_dict)
         log_dict = self.process_log_dict(sup_loss=sup_loss.item(), 
