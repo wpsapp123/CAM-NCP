@@ -34,6 +34,7 @@ class FixMatch(AlgorithmBase):
         super().__init__(args, net_builder, tb_log, logger) 
         # fixmatch specified arguments
         self.init(T=args.T, p_cutoff=args.p_cutoff, hard_label=args.hard_label)
+        self.p_model = torch.ones((self.num_classes)) / self.num_classes
         self.margin = 6
         self.lambda_m = 0.1
         self.lambda_n = 1
@@ -123,7 +124,9 @@ class FixMatch(AlgorithmBase):
                                           use_hard_label=self.use_hard_label,
                                           T=self.T,
                                           softmax=False)
-
+            if not self.p_model.is_cuda:                                      
+                self.p_model = self.p_model.to(prob_w.device)
+            self.p_model = self.p_model * 0.999 + (1 - 0.999) * prob_w.mean(dim=0)
             # NCP_loss
             ncp_loss = torch.mean((1-mask)*torch.mean(prob_s*self.calculate_k_i(prob_w, mask = mask, m=0.999, num_classes=prob_w.shape[1], batch_size=prob_w.shape[0]), dim=-1))
             # CAM_loss
